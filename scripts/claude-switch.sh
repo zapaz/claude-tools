@@ -1,0 +1,150 @@
+#!/bin/bash
+# =============================================================================
+# claude-switch — Multi-account switcher for Claude Code on macOS
+# =============================================================================
+#
+# Stores OAuth tokens for 2 accounts in the macOS Keychain (separate entries)
+# and injects the right one into the entry Claude Code reads at launch.
+# Everything lives in the Keychain, nothing on disk.
+#
+# Usage:
+#   claude-switch setup 1|2      — Capture current Keychain token for a profile
+#   claude-switch 1|2 [args...]  — Launch Claude Code with chosen profile
+#   claude-switch status         — Show profile status
+#   claude-switch export 1|2    — Display a token (debug)
+#   claude-switch clean          — Remove claude-switch entries from Keychain
+#
+# Installation:
+#   chmod +x claude-switch.sh && cp claude-switch.sh /usr/local/bin/claude-switch
+#
+# Recommended aliases (~/.zshrc):
+#   alias cc1="claude-switch 1"
+#   alias cc2="claude-switch 2"
+#
+# =============================================================================
+
+set -euo pipefail
+
+CC_SERVICE="Claude Code-credentials"
+PREFIX="claude-switch"
+ACCOUNT="$USER"
+CLAUDE_BIN="${CLAUDE_BIN:-claude}"
+
+RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[1;33m'
+BLUE='\033[0;34m' CYAN='\033[0;36m' DIM='\033[2m' NC='\033[0m'
+
+info()  { echo -e "${BLUE}ℹ${NC}  $*"; }
+ok()    { echo -e "${GREEN}✓${NC}  $*"; }
+warn()  { echo -e "${YELLOW}⚠${NC}  $*"; }
+error() { echo -e "${RED}✗${NC}  $*" >&2; }
+
+svc() { [[ "$1" == 1 || "$1" == 2 ]] || { error "Profile: 1 or 2"; exit 1; }; echo "${PREFIX}-profile-$1"; }
+
+kc_read()   { security find-generic-password -s "$1" -a "$ACCOUNT" -w 2>/dev/null || echo ""; }
+kc_write()  { security delete-generic-password -s "$1" -a "$ACCOUNT" 2>/dev/null || true
+              security add-generic-password -s "$1" -a "$ACCOUNT" -w "$2" -U 2>/dev/null; }
+kc_delete() { security delete-generic-password -s "$1" -a "$ACCOUNT" 2>/dev/null || true; }
+
+token_preview() {
+    python3 -c "
+import json,sys,datetime
+try:
+    d=json.loads(sys.stdin.read());o=d.get('claudeAiOauth',{})
+    at=o.get('accessToken','');exp=o.get('expiresAt',0)
+    e=datetime.datetime.fromtimestamp(exp/1000).strftime('%Y-%m-%d %H:%M') if exp else 'N/A'
+    print(f'{at[:25]}...  expires: {e}')
+except: print('(unrecognized format)')
+" <<< "$1" 2>/dev/null || echo "${1:0:30}..."
+}
+
+cmd_setup() {
+    local s; s=$(svc "$1")
+    info "Reading token from Keychain..."
+    local t; t=$(kc_read "$CC_SERVICE")
+    [[ -z "$t" ]] && { error "No token found. Run claude → /login → quit, then run setup again."; exit 1; }
+    info "$(token_preview "$t")"
+    kc_write "$s" "$t"
+    ok "Token saved for profile $1"
+}
+
+cmd_run() {
+    local p="$1"; shift
+    local s; s=$(svc "$p")
+    local t; t=$(kc_read "$s")
+    [[ -z "$t" ]] && { error "Profile $p not configured. Run: claude-switch setup $p"; exit 1; }
+
+    info "Activating profile ${CYAN}$p${NC}"
+    kc_write "$CC_SERVICE" "$t"
+    ok "Token injected"
+    echo ""
+
+    local cd="$HOME/.claude-profile-${p}"; mkdir -p "$cd"
+    CLAUDE_CONFIG_DIR="$cd" "$CLAUDE_BIN" "$@"
+    local rc=$?
+
+    local r; r=$(kc_read "$CC_SERVICE")
+    if [[ -n "$r" && "$r" != "$t" ]]; then
+        kc_write "$s" "$r"
+        ok "Refreshed token saved (profile $p)"
+    fi
+    return $rc
+}
+
+cmd_status() {
+    echo ""; local cur; cur=$(kc_read "$CC_SERVICE")
+    for p in 1 2; do
+        local s; s=$(svc "$p"); local t; t=$(kc_read "$s")
+        if [[ -n "$t" ]]; then
+            local a=""; [[ -n "$cur" && "$t" == "$cur" ]] && a=" ${GREEN}← ACTIVE${NC}"
+            ok "Profile $p${a}"; echo -e "     ${DIM}$(token_preview "$t")${NC}"
+        else echo -e "  ${YELLOW}○${NC}  Profile $p: not configured"; fi
+    done; echo ""
+}
+
+cmd_export() {
+    local s; s=$(svc "$1"); local t; t=$(kc_read "$s")
+    [[ -z "$t" ]] && { error "Profile $1 not configured."; exit 1; }
+    warn "Token in plain text:"; echo ""
+    echo "$t" | python3 -m json.tool 2>/dev/null || echo "$t"; echo ""
+}
+
+cmd_clean() {
+    warn "Remove all claude-switch entries from Keychain..."
+    read -rp "Confirm? [y/N] " c; [[ ! "${c:-N}" =~ ^[Yy] ]] && { warn "Cancelled."; exit 0; }
+    for p in 1 2; do local s; s=$(svc "$p")
+        [[ -n "$(kc_read "$s")" ]] && { kc_delete "$s"; ok "Deleted: $s"; }
+    done; info "Claude Code entry (${CC_SERVICE}) was not touched."
+}
+
+cmd_help() {
+    cat <<EOF
+
+${CYAN}claude-switch${NC} — 2 Claude Code accounts, 1 Mac
+${DIM}Everything in the Keychain, nothing on disk.${NC}
+
+  claude-switch setup 1|2        Capture current token
+  claude-switch 1|2 [args...]    Launch Claude Code
+  claude-switch status           Profile status
+  claude-switch export 1|2       Display a token
+  claude-switch clean            Clean up Keychain
+
+Setup:
+  claude → /login account-A → quit → claude-switch setup 1
+  claude → /login account-B → quit → claude-switch setup 2
+
+Usage:
+  claude-switch 1    or    claude-switch 2
+
+EOF
+}
+
+[[ $# -lt 1 ]] && { cmd_help; exit 0; }
+case "$1" in
+    setup)  [[ $# -lt 2 ]] && { error "Usage: claude-switch setup 1|2"; exit 1; }; cmd_setup "$2" ;;
+    status) cmd_status ;;
+    export) [[ $# -lt 2 ]] && { error "Usage: claude-switch export 1|2"; exit 1; }; cmd_export "$2" ;;
+    clean)  cmd_clean ;;
+    help|--help|-h) cmd_help ;;
+    1|2)    p="$1"; shift; cmd_run "$p" "$@" ;;
+    *)      error "Unknown command: $1"; cmd_help; exit 1 ;;
+esac
