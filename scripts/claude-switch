@@ -5,28 +5,24 @@
 #
 # Stores OAuth tokens for unlimited accounts in the macOS Keychain and injects
 # the right one into the entry Claude Code reads at launch.
-# Profile metadata (subscription labels) stored as JSON in a separate entry.
+# Subscription metadata stored as JSON in a separate Keychain entry.
 # Everything lives in the Keychain, nothing on disk.
 #
 # Usage:
-#   claude-switch setup [N]      — Capture current Keychain token for a profile
-#   claude-switch N [args...]    — Launch Claude Code with chosen profile
-#   claude-switch status         — Show profile status
-#   claude-switch export N       — Display a token (debug)
+#   claude-switch setup [n]      — Capture current Keychain token for a subscription
+#   claude-switch n [args...]    — Launch Claude Code with chosen subscription
+#   claude-switch status         — Show subscription status
+#   claude-switch export n       — Display a token (debug)
 #   claude-switch clean          — Remove claude-switch entries from Keychain
 #
 # Installation:
 #   ./scripts/install.sh
 #
-# Recommended aliases (~/.zshrc):
-#   alias cc1="claude-switch 1"
-#   alias cc2="claude-switch 2"
-#
 # =============================================================================
 
 set -euo pipefail
 
-VERSION="0.0.2"
+VERSION="0.0.6"
 
 CC_SERVICE="Claude Code-credentials"
 PREFIX="claude-switch"
@@ -43,8 +39,8 @@ warn()  { echo "${YELLOW}⚠${NC}  $*"; }
 error() { echo "${RED}✗${NC}  $*" >&2; }
 
 svc() {
-    [[ "$1" =~ ^[1-9][0-9]*$ ]] || { error "Profile must be a positive integer"; exit 1; }
-    echo "${PREFIX}-profile-$1"
+    [[ "$1" =~ ^[1-9][0-9]*$ ]] || { error "Subscription must be a positive integer"; exit 1; }
+    echo "${PREFIX}-subscription-$1"
 }
 
 kc_read()   { security find-generic-password -s "$1" -a "$ACCOUNT" -w 2>/dev/null || echo ""; }
@@ -91,7 +87,7 @@ while n in nums: n+=1
 print(n)" "$(meta_read)"
 }
 
-meta_profiles() {
+meta_subscriptions() {
     python3 -c "
 import json,sys
 d=json.loads(sys.argv[1]); print(' '.join(str(k) for k in sorted(int(x) for x in d)))" "$(meta_read)"
@@ -121,20 +117,35 @@ detect_plan() {
     python3 -c "
 import json,sys,base64
 LABELS={
-    'free':'Free','pro':'Pro','max_5x':'Max 5x','max_20x':'Max 20x',
-    'team':'Team','enterprise':'Enterprise','education':'Education',
+    'free':'Free','pro':'Pro','max':'Max 5x',
+    'max_5x':'Max 5x','max_20x':'Max 20x',
     'max5x':'Max 5x','max20x':'Max 20x',
+    'team':'Team','enterprise':'Enterprise','education':'Education',
+}
+RATE_TIERS={
+    'max_5x':'Max 5x','max_20x':'Max 20x',
 }
 def match(v):
     if not isinstance(v,str): return ''
     k=v.lower().replace(' ','_').replace('-','_')
     return LABELS.get(k,'')
 
+def match_rate_tier(v):
+    if not isinstance(v,str): return ''
+    k=v.lower()
+    for slug,label in RATE_TIERS.items():
+        if slug in k: return label
+    return ''
+
 def scan(obj):
-    for field in ('planType','plan','tier','subscription','membershipType','plan_type','account_type'):
+    for field in ('subscriptionType','planType','plan','tier','subscription','membershipType','plan_type','account_type'):
         v=obj.get(field,'')
         m=match(v)
         if m: return m
+    # fallback: extract tier from rateLimitTier
+    v=obj.get('rateLimitTier','')
+    m=match_rate_tier(v)
+    if m: return m
     return ''
 
 try:
@@ -165,10 +176,10 @@ cmd_setup() {
     if [[ -n "${1:-}" ]]; then
         num="$1"
         # validate
-        [[ "$num" =~ ^[1-9][0-9]*$ ]] || { error "Profile must be a positive integer"; exit 1; }
+        [[ "$num" =~ ^[1-9][0-9]*$ ]] || { error "Subscription must be a positive integer"; exit 1; }
     else
         num=$(meta_next)
-        info "Auto-assigning profile ${CYAN}$num${NC}"
+        info "Auto-assigning subscription ${CYAN}$num${NC}"
     fi
 
     local s; s=$(svc "$num")
@@ -177,46 +188,65 @@ cmd_setup() {
     [[ -z "$t" ]] && { error "No token found. Run claude → /login → quit, then run setup again."; exit 1; }
     info "$(token_preview "$t")"
 
+    # check for duplicate token
+    local subs; subs=$(meta_subscriptions)
+    for p in $subs; do
+        local existing; existing=$(kc_read "$(svc "$p")")
+        if [[ -n "$existing" && "$existing" == "$t" ]]; then
+            local elbl; elbl=$(meta_get_label "$p")
+            error "This token is already saved as subscription $p (${elbl})"; exit 1
+        fi
+    done
+
     # detect subscription
+    local plans=("Free" "Pro" "Max 5x" "Max 20x" "Team" "Enterprise" "Education")
     local detected; detected=$(detect_plan "$t")
     local label=""
     if [[ -n "$detected" ]]; then
-        info "Detected subscription: ${CYAN}${detected}${NC}"
-        read -rp "  Label [${detected}]: " user_label
-        label="${user_label:-$detected}"
+        label="$detected"
+        ok "Detected subscription: ${CYAN}${label}${NC}"
     else
-        read -rp "  Subscription label (e.g. Pro, Max 5x, Team): " label
-        [[ -z "$label" ]] && label="unknown"
+        info "Select subscription type:"
+        for i in "${!plans[@]}"; do
+            echo "    $((i+1))) ${plans[$i]}"
+        done
+        echo ""
+        read -rp "  Choice [1-${#plans[@]}]: " choice
+        if [[ "$choice" =~ ^[1-9][0-9]*$ ]] && (( choice >= 1 && choice <= ${#plans[@]} )); then
+            label="${plans[$((choice-1))]}"
+        else
+            error "Invalid choice"; exit 1
+        fi
     fi
 
     kc_write "$s" "$t"
     meta_set "$num" "$label"
-    ok "Token saved for profile ${CYAN}$num${NC} (${label})"
+    ok "Token saved for subscription ${CYAN}$num${NC} (${label})"
 }
 
 cmd_run() {
     local p="$1"; shift
     local s; s=$(svc "$p")
     local t; t=$(kc_read "$s")
-    [[ -z "$t" ]] && { error "Profile $p not configured. Run: claude-switch setup $p"; exit 1; }
+    [[ -z "$t" ]] && { error "Subscription $p not configured. Run: claude-switch setup $p"; exit 1; }
 
     local label; label=$(meta_get_label "$p")
     local display="$p"
     [[ -n "$label" ]] && display="$p (${label})"
 
-    info "Activating profile ${CYAN}${display}${NC}"
+    info "Activating subscription ${CYAN}${display}${NC}"
     kc_write "$CC_SERVICE" "$t"
     ok "Token injected"
     echo ""
 
-    local cd="$HOME/.claude-profile-${p}"; mkdir -p "$cd"
+    local cd="$HOME/.claude-subscription-${p}"; mkdir -p "$cd"
     CLAUDE_CONFIG_DIR="$cd" "$CLAUDE_BIN" "$@"
     local rc=$?
 
     local r; r=$(kc_read "$CC_SERVICE")
     if [[ -n "$r" && "$r" != "$t" ]]; then
         kc_write "$s" "$r"
-        ok "Refreshed token saved (profile $p)"
+        ok "Refreshed token saved (subscription $p)"
     fi
     return $rc
 }
@@ -224,37 +254,21 @@ cmd_run() {
 cmd_status() {
     echo ""
     local cur; cur=$(kc_read "$CC_SERVICE")
-    local profiles; profiles=$(meta_profiles)
+    local subs; subs=$(meta_subscriptions)
 
-    if [[ -z "$profiles" ]]; then
-        # check for legacy profiles (1, 2) without meta
-        local found_legacy=false
-        for p in 1 2; do
-            local s; s=$(svc "$p"); local t; t=$(kc_read "$s")
-            if [[ -n "$t" ]]; then
-                if ! $found_legacy; then
-                    warn "Found legacy profiles (no labels). Run setup again to add labels."
-                    found_legacy=true
-                fi
-                local a=""; [[ -n "$cur" && "$t" == "$cur" ]] && a=" ${GREEN}← ACTIVE${NC}"
-                ok "Profile $p${a}"
-                echo -e "     ${DIM}$(token_preview "$t")${NC}"
-            fi
-        done
-        if ! $found_legacy; then
-            info "No profiles configured. Run: claude-switch setup"
-        fi
+    if [[ -z "$subs" ]]; then
+        info "No subscriptions configured. Run: claude-switch setup"
     else
-        for p in $profiles; do
+        for p in $subs; do
             local s; s=$(svc "$p"); local t; t=$(kc_read "$s")
             local label; label=$(meta_get_label "$p")
             if [[ -n "$t" ]]; then
                 local a=""; [[ -n "$cur" && "$t" == "$cur" ]] && a=" ${GREEN}← ACTIVE${NC}"
                 local lbl=""; [[ -n "$label" ]] && lbl=": ${label}"
-                ok "Profile ${p}${lbl}${a}"
+                ok "Subscription ${p}${lbl}${a}"
                 echo -e "     ${DIM}$(token_preview "$t")${NC}"
             else
-                echo -e "  ${YELLOW}○${NC}  Profile $p (${label}): token missing"
+                echo -e "  ${YELLOW}○${NC}  Subscription $p (${label}): token missing"
             fi
         done
     fi
@@ -263,11 +277,11 @@ cmd_status() {
 
 cmd_export() {
     local s; s=$(svc "$1"); local t; t=$(kc_read "$s")
-    [[ -z "$t" ]] && { error "Profile $1 not configured."; exit 1; }
+    [[ -z "$t" ]] && { error "Subscription $1 not configured."; exit 1; }
     local label; label=$(meta_get_label "$1")
     local display="$1"
     [[ -n "$label" ]] && display="$1 (${label})"
-    warn "Token for profile ${display} in plain text:"; echo ""
+    warn "Token for subscription ${display} in plain text:"; echo ""
     echo "$t" | python3 -m json.tool 2>/dev/null || echo "$t"; echo ""
 }
 
@@ -275,19 +289,11 @@ cmd_clean() {
     warn "Remove all claude-switch entries from Keychain..."
     read -rp "Confirm? [y/N] " c; [[ ! "${c:-N}" =~ ^[Yy] ]] && { warn "Cancelled."; exit 0; }
 
-    local profiles; profiles=$(meta_profiles)
-    if [[ -n "$profiles" ]]; then
-        for p in $profiles; do
-            local s; s=$(svc "$p")
-            [[ -n "$(kc_read "$s")" ]] && { kc_delete "$s"; ok "Deleted: $s"; }
-        done
-    else
-        # clean legacy entries
-        for p in 1 2; do
-            local s; s=$(svc "$p")
-            [[ -n "$(kc_read "$s")" ]] && { kc_delete "$s"; ok "Deleted: $s"; }
-        done
-    fi
+    local subs; subs=$(meta_subscriptions)
+    for p in $subs; do
+        local s; s=$(svc "$p")
+        [[ -n "$(kc_read "$s")" ]] && { kc_delete "$s"; ok "Deleted: $s"; }
+    done
 
     [[ -n "$(kc_read "$META_SERVICE")" ]] && { kc_delete "$META_SERVICE"; ok "Deleted: ${META_SERVICE}"; }
     info "Claude Code entry (${CC_SERVICE}) was not touched."
@@ -295,13 +301,13 @@ cmd_clean() {
 
 cmd_help() {
     echo ""
-    echo "${CYAN}claude-switch${NC} — Unlimited Claude Code profiles, 1 Mac"
+    echo "${CYAN}claude-switch${NC} ${DIM}v${VERSION}${NC} — Multiple Claude Code subscriptions, 1 Mac"
     echo "${DIM}Everything in the Keychain, nothing on disk.${NC}"
     echo ""
-    echo "  claude-switch setup [N]        Capture current token (auto-assigns N if omitted)"
-    echo "  claude-switch N [args...]      Launch Claude Code with profile N"
-    echo "  claude-switch status           Profile status"
-    echo "  claude-switch export N         Display a token"
+    echo "  claude-switch setup [n]        Capture current token (auto-assigns n if omitted)"
+    echo "  claude-switch n [args...]      Launch Claude Code with subscription n"
+    echo "  claude-switch status           Subscription status"
+    echo "  claude-switch export n         Display a token"
     echo "  claude-switch clean            Clean up Keychain"
     echo ""
     echo "Setup:"
@@ -320,7 +326,7 @@ cmd_help() {
 case "$1" in
     setup)  shift; cmd_setup "${1:-}" ;;
     status) cmd_status ;;
-    export) [[ $# -lt 2 ]] && { error "Usage: claude-switch export N"; exit 1; }; cmd_export "$2" ;;
+    export) [[ $# -lt 2 ]] && { error "Usage: claude-switch export n"; exit 1; }; cmd_export "$2" ;;
     clean)  cmd_clean ;;
     help|--help|-h) cmd_help ;;
     --version|-V) echo "$VERSION" ;;
