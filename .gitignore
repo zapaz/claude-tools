@@ -1,6 +1,12 @@
 
+# macOS
+.DS_Store
+
 # Ignore personal Claude Code settings & local instructions
 **/.claude/*.local.json
+
+# clautty build artifact
+claude-switch/Clautty.app/
 
 # Python
 __pycache__/
