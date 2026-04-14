@@ -97,6 +97,11 @@ echo "Généré: $DIR/clautty.icns"
 cp "$DIR/clautty.icns" "$APP/Contents/Resources/applet.icns"
 rm -f "$APP/Contents/Resources/Assets.car"
 touch "$APP"
+
+# Sceau rompu sinon (applet.icns modifié, Assets.car supprimé) → Gatekeeper bloque le launch Finder.
+xattr -cr "$APP" 2>/dev/null || true
+codesign --force --deep --sign - "$APP"
+
 rm -rf "$HOME/Library/Caches/com.apple.iconservices.store" 2>/dev/null || true
 killall Dock Finder 2>/dev/null || true
 
