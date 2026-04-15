@@ -33,12 +33,6 @@ To configure manually, add to `~/.claude/settings.json`:
 }
 ```
 
-## Input / Output
-
-**Input**: Claude Code pipes a JSON object to stdin containing session state (`workspace`, `model`, `output_style`, `vim`, `context_window`).
-
-**Output**: A single ANSI-colored line to stdout.
-
 Example output (without colors):
 
 ```

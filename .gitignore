@@ -6,7 +6,7 @@
 **/.claude/*.local.json
 
 # clautty build artifact
-claude-switch/Clautty.app/
+clautty/Clautty.app/
 
 # Python
 __pycache__/

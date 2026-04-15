@@ -25,16 +25,18 @@ on doClautty(sshTarget)
         set rightCmd to "ssh " & sshTarget
     end if
 
-    -- Si Ghostty n'est pas déjà lancé, `activate` crée une fenêtre par défaut
-    -- qu'on réutilise au lieu d'en ouvrir une deuxième (vide).
+    -- Ghostty expose une commande native `new window` (cf. Ghostty.sdef) qu'il
+    -- faut appeler sans le préfixe `make` : `make new window` utilise le verbe
+    -- AppleScript générique et échoue (-2710) parce que la classe `window` est
+    -- en accès "r" dans le dictionnaire.
     set wasRunning to running of application "Ghostty"
 
     tell application "Ghostty"
         activate
         if wasRunning then
-            set win to make new window
+            set win to new window
         else
-            repeat 20 times
+            repeat 40 times
                 if (count of windows) > 0 then exit repeat
                 delay 0.05
             end repeat
