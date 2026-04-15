@@ -29,6 +29,18 @@ clautty runbot      # ssh runbot claude + ssh runbot
 
 Click the `Clautty` icon in the Dock for the same behavior as bare `clautty`.
 
+## Remember the last directory
+
+To have `clautty` open in the working directory of the last Ghostty window you closed, source the shell hook from your rc:
+
+```bash
+# ~/.zshrc or ~/.bashrc
+[ -f /path/to/claude-tools/clautty/shell-hook.sh ] \
+    && . /path/to/claude-tools/clautty/shell-hook.sh
+```
+
+The hook only activates inside Ghostty and writes `$PWD` to `~/.config/clautty/last-dir` on every prompt. Next time you launch `clautty` (CLI or Dock icon) locally, both panes `cd` into that directory before starting. SSH mode (`clautty <host>`) is unaffected.
+
 ## Requirements
 
 - macOS (AppleScript)

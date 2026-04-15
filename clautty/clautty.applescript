@@ -18,8 +18,16 @@ on doClautty(sshTarget)
     set CLAUDE_CMD to "claude --dangerously-skip-permissions"
 
     if sshTarget is "" then
-        set leftCmd to CLAUDE_CMD
-        set rightCmd to ""
+        -- Reprise du cwd de la dernière fenêtre Ghostty fermée (cf. shell-hook.sh).
+        set startDir to readLastDir()
+        if startDir is "" then
+            set leftCmd to CLAUDE_CMD
+            set rightCmd to ""
+        else
+            set dq to quoted form of startDir
+            set leftCmd to "cd " & dq & " && " & CLAUDE_CMD
+            set rightCmd to "cd " & dq
+        end if
     else
         set leftCmd to "ssh -t " & sshTarget & " -- '$SHELL -lic \"" & CLAUDE_CMD & "\"'"
         set rightCmd to "ssh " & sshTarget
@@ -53,3 +61,14 @@ on doClautty(sshTarget)
         focus leftPane
     end tell
 end doClautty
+
+-- Lit ~/.config/clautty/last-dir (écrit par shell-hook.sh). Renvoie "" si le
+-- fichier est absent, vide, ou si le chemin n'existe plus.
+on readLastDir()
+    try
+        set d to do shell script "d=$(cat \"$HOME/.config/clautty/last-dir\" 2>/dev/null); [ -n \"$d\" ] && [ -d \"$d\" ] && printf %s \"$d\""
+        return d
+    on error
+        return ""
+    end try
+end readLastDir
